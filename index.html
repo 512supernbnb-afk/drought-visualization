@@ -324,7 +324,11 @@
 
     function renderMainChart(year) {
         const yearData = globalData.dailyData.filter(d => d.year === year);
-        const x_axis = yearData.map(d => d.dateStr); // 使用完整日期字串讓 tooltip 更清楚
+        
+        // 【修改點 1】這裡改成 d.date (日期物件)，而不是 d.dateStr (文字)
+        // 這樣 Plotly 才能把它當作時間軸來自動縮放，不會全部擠在一起
+        const x_axis = yearData.map(d => d.date); 
+        
         const y_rain = yearData.map(d => d.rollSum);
         const y_cut = yearData.map(d => globalData.cuttingLevel[d.doy]);
 
@@ -333,26 +337,20 @@
         const annotations = [];
         let inDrought = false;
         let eventStart = null;
-        let eventMagnitude = 0; // D值累積
-        let minValInEvent = Infinity;
-        let minIndexInEvent = -1;
+        let eventMagnitude = 0; 
 
-        // 輔助函數：結束一個事件
         const closeEvent = (endIndex) => {
-            // 只有當 D > 0 才算 (可調整閾值)
             if (eventMagnitude > 0) {
-                // 1. 畫背景紅框
                 shapes.push({
                     type: 'rect',
-                    xref: 'x', yref: 'paper',
+                    // 因為 x_axis 現在是日期物件，這裡也要用日期
                     x0: x_axis[eventStart], x1: x_axis[endIndex],
+                    xref: 'x', yref: 'paper',
                     y0: 0, y1: 1,
-                    fillcolor: 'rgba(231, 76, 60, 0.2)', // 淺紅色
+                    fillcolor: 'rgba(231, 76, 60, 0.2)',
                     line: { width: 0 }
                 });
 
-                // 2. 標記強度 D
-                // 找事件中間點或最低點標示
                 const midIndex = Math.floor((eventStart + endIndex) / 2);
                 annotations.push({
                     x: x_axis[midIndex],
@@ -378,14 +376,11 @@
                     inDrought = true;
                     eventStart = i;
                 }
-                eventMagnitude += (cut - val); // 累積強度
+                eventMagnitude += (cut - val); 
             } else {
-                if (inDrought) {
-                    closeEvent(i - 1);
-                }
+                if (inDrought) closeEvent(i - 1);
             }
         }
-        // 如果年底還在乾旱
         if (inDrought) closeEvent(yearData.length - 1);
 
 
@@ -402,8 +397,14 @@
         };
 
         const layout = {
-            title: { text: `${year} 年降雨與乾旱事件分析 (D=乾旱量 mm⋅day)`, font: {size: 18} },
-            xaxis: { title: '日期' },
+            title: { text: `${year} 年降雨與乾旱事件分析 (D=強度)`, font: {size: 18} },
+            xaxis: { 
+                title: '日期',
+                // 【修改點 2】設定日期格式
+                tickformat: '%m/%d', // 只顯示 月/日
+                dtick: "M1",         // 強制每個月顯示一個刻度 (可選，若覺得還太擠可拿掉這行)
+                hoverformat: '%Y/%m/%d' // 滑鼠移上去時顯示完整日期
+            },
             yaxis: { title: '雨量 (mm)' },
             shapes: shapes,
             annotations: annotations,
@@ -414,7 +415,6 @@
 
         Plotly.newPlot('main-chart', [traceRain, traceCut], layout);
     }
-
     // --- 長條圖切換功能 ---
     function setBarMode(mode) {
         currentBarMode = mode;
@@ -475,3 +475,4 @@
 </body>
 
 </html>
+
