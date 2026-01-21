@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>氣象指標法乾旱分析</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --primary: #2c3e50;
+            --rain-color: #3498db;
+            --drought-color: #e74c3c;
+            --highlight: #f39c12; /* 高亮顏色 */
+            --bg: #f8f9fa;
+        }
+        body {
+            font-family: "Microsoft JhengHei", "Heiti TC", sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg);
+            color: var(--primary);
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        /* 標題區域 */
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 3px solid #ddd;
+            padding-bottom: 20px;
+        }
+        h1 { margin: 0; font-size: 2.2em; color: var(--primary); }
+        .subtitle {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #666;
+            background: #eee;
+            display: inline-block;
+            padding: 8px 15px;
+            border-radius: 5px;
+            line-height: 1.5;
+        }
+
+        /* 控制面板 */
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        select {
+            padding: 8px;
+            font-size: 1em;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+        .slider-container {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            min-width: 300px;
+        }
+        input[type=range] {
+            flex-grow: 1;
+            cursor: pointer;
+        }
+        #current-year-display {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: var(--primary);
+            min-width: 80px;
+        }
+
+        /* 圖表區塊 */
+        .chart-box {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+            margin-bottom: 20px;
+            min-height: 450px;
+        }
+
+        /* 切換按鈕樣式 */
+        .toggle-btn-group {
+            display: flex;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .toggle-btn {
+            padding: 8px 16px;
+            border: none;
+            background: #f1f1f1;
+            cursor: pointer;
+            transition: 0.3s;
+            font-weight: bold;
+        }
+        .toggle-btn.active {
+            color: white;
+        }
+        .toggle-btn.active.drought { background: var(--drought-color); }
+        .toggle-btn.active.rain { background: var(--rain-color); }
+
+        .loading-overlay {
+            position: fixed; top:0; left:0; width:100%; height:100%;
+            background: rgba(255,255,255,0.9);
+            display: flex; justify-content: center; align-items: center;
+            z-index: 1000;
+            font-size: 1.5em;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="loading-overlay" id="loading">資料讀取運算中...</div>
+
+<div class="container">
+    <header>
+        <h1>氣象指標法乾旱分析</h1>
+        <div class="subtitle">
+            ⚠️ 備註：本分析僅考慮降雨量數據，未使用水資源調度及水庫水位資料。<br>
+            所計算之乾旱指標與強度僅供學術研究參考，非代表水利署公告之正式水利災害。
+        </div>
+    </header>
+
+    <div class="controls">
+        <div class="control-group">
+            <label for="station-select">📍 選擇測站：</label>
+            <select id="station-select">
+                <option value="./data/大湖山_雨量日資料.json">大湖山測站</option>
+                <option value="./data/小公田(2)_雨量日資料.json">小公田測站</option>
+                </select>
+        </div>
+
+        <div class="slider-container">
+            <label>📅 分析年份：</label>
+            <input type="range" id="year-slider" min="1900" max="2024" step="1">
+            <span id="current-year-display">--</span>
+        </div>
+    </div>
+
+    <div class="chart-box" id="main-chart"></div>
+
+    <div class="chart-box">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <h3 style="margin:0;">歷年統計概況</h3>
+            <div class="toggle-btn-group">
+                <button class="toggle-btn active drought" onclick="setBarMode('drought')">🔥 乾旱天數</button>
+                <button class="toggle-btn" onclick="setBarMode('rain')">💧 年總雨量</button>
+            </div>
+        </div>
+        <div id="summary-chart"></div>
+    </div>
+</div>
+
+<script>
+    // --- 全域變數 ---
+    let globalData = {
+        dailyData: [],
+        cuttingLevel: [], // 1-366 的閾值
+        yearlyStats: [],
+        years: []
+    };
+    let currentBarMode = 'drought'; // 'drought' or 'rain'
+
+    // --- 初始化 ---
+    window.addEventListener('DOMContentLoaded', () => {
+        const select = document.getElementById('station-select');
+        // 載入預設選單的第一個測站
+        loadStationData(select.value);
+
+        // 監聽選單變更
+        select.addEventListener('change', (e) => {
+            loadStationData(e.target.value);
+        });
+
+        // 監聽滑桿變更
+        document.getElementById('year-slider').addEventListener('input', (e) => {
+            updateDashboard(parseInt(e.target.value));
+        });
+    });
+
+    // --- 1. 資料讀取 (Fetch) ---
+    async function loadStationData(url) {
+        const loading = document.getElementById('loading');
+        loading.style.display = 'flex';
+        
+        try {
+            const response = await fetch(url);
+            if (!response.ok) throw new Error("HTTP error " + response.status);
+            const jsonData = await response.json();
+            
+            processData(jsonData);
+            setupSlider();
+            
+            // 預設顯示最新年份
+            const lastYear = globalData.years[globalData.years.length - 1];
+            document.getElementById('year-slider').value = lastYear;
+            updateDashboard(lastYear);
+
+        } catch (error) {
+            console.error(error);
+            alert("讀取資料失敗！\n\n請確認：\n1. 您是否使用了 Web Server (如 Live Server) 開啟網頁？\n2. './data/' 資料夾下是否有對應的 JSON 檔？");
+        } finally {
+            loading.style.display = 'none';
+        }
+    }
+
+    // --- 2. 核心運算邏輯 (移植 R Code) ---
+    function processData(rawData) {
+        // A. 資料清理 & 30日 Roll Sum
+        const cleanData = rawData.map(d => {
+            const dateStr = d.yymmdd.split(' ')[0];
+            const dateParts = dateStr.split('/');
+            const dateObj = new Date(dateParts[0], dateParts[1]-1, dateParts[2]);
+            
+            const start = new Date(dateObj.getFullYear(), 0, 0);
+            const diff = dateObj - start;
+            const oneDay = 1000 * 60 * 60 * 24;
+            const doy = Math.floor(diff / oneDay);
+
+            return {
+                date: dateObj,
+                dateStr: dateStr,
+                year: dateObj.getFullYear(),
+                doy: doy,
+                rainfall: d.DAVG === null ? 0 : parseFloat(d.DAVG),
+                rollSum: null
+            };
+        }).sort((a, b) => a.date - b.date);
+
+        // 計算 30日累積
+        for (let i = 0; i < cleanData.length; i++) {
+            if (i < 29) {
+                cleanData[i].rollSum = null;
+            } else {
+                let sum = 0;
+                for (let j = 0; j < 30; j++) sum += cleanData[i - j].rainfall;
+                cleanData[i].rollSum = sum;
+            }
+        }
+
+        // B. 計算 Cutting Level (歷史 20% 分位數)
+        const doyBuckets = Array.from({length: 367}, () => []);
+        cleanData.forEach(d => {
+            if (d.rollSum !== null) doyBuckets[d.doy].push(d.rollSum);
+        });
+
+        const cuttingLevels = {};
+        for (let i = 1; i <= 366; i++) {
+            const values = doyBuckets[i];
+            if (values.length > 0) {
+                values.sort((a, b) => a - b);
+                const idx = Math.floor(values.length * 0.2); // Quantile 0.2
+                cuttingLevels[i] = values[idx];
+            } else {
+                cuttingLevels[i] = 0;
+            }
+        }
+
+        // C. 計算歷年統計 (乾旱天數 & 總雨量)
+        const yearSet = new Set(cleanData.map(d => d.year));
+        const years = Array.from(yearSet).sort((a, b) => a - b);
+        const yearlyStats = [];
+
+        years.forEach(yr => {
+            const yearRecords = cleanData.filter(d => d.year === yr);
+            
+            // 1. 總雨量
+            const totalRain = yearRecords.reduce((sum, d) => sum + d.rainfall, 0);
+
+            // 2. 乾旱天數 (依據 Cutting Level)
+            let droughtDays = 0;
+            yearRecords.forEach(d => {
+                if (d.rollSum !== null) {
+                    const threshold = cuttingLevels[d.doy];
+                    if (d.rollSum < threshold) droughtDays++;
+                }
+            });
+
+            yearlyStats.push({ 
+                year: yr, 
+                droughtDays: droughtDays, 
+                totalRain: totalRain 
+            });
+        });
+
+        globalData.dailyData = cleanData;
+        globalData.cuttingLevel = cuttingLevels;
+        globalData.yearlyStats = yearlyStats;
+        globalData.years = years;
+    }
+
+    function setupSlider() {
+        const slider = document.getElementById('year-slider');
+        slider.min = globalData.years[0];
+        slider.max = globalData.years[globalData.years.length - 1];
+    }
+
+    // --- 3. 視覺化更新 ---
+    function updateDashboard(selectedYear) {
+        document.getElementById('current-year-display').innerText = selectedYear;
+        
+        renderMainChart(selectedYear);
+        renderBarChart(selectedYear);
+    }
+
+    function renderMainChart(year) {
+        const yearData = globalData.dailyData.filter(d => d.year === year);
+        const x_axis = yearData.map(d => d.dateStr); // 使用完整日期字串讓 tooltip 更清楚
+        const y_rain = yearData.map(d => d.rollSum);
+        const y_cut = yearData.map(d => globalData.cuttingLevel[d.doy]);
+
+        // 偵測乾旱事件 (產生 Shape 與 Annotation)
+        const shapes = [];
+        const annotations = [];
+        let inDrought = false;
+        let eventStart = null;
+        let eventMagnitude = 0; // D值累積
+        let minValInEvent = Infinity;
+        let minIndexInEvent = -1;
+
+        // 輔助函數：結束一個事件
+        const closeEvent = (endIndex) => {
+            // 只有當 D > 0 才算 (可調整閾值)
+            if (eventMagnitude > 0) {
+                // 1. 畫背景紅框
+                shapes.push({
+                    type: 'rect',
+                    xref: 'x', yref: 'paper',
+                    x0: x_axis[eventStart], x1: x_axis[endIndex],
+                    y0: 0, y1: 1,
+                    fillcolor: 'rgba(231, 76, 60, 0.2)', // 淺紅色
+                    line: { width: 0 }
+                });
+
+                // 2. 標記強度 D
+                // 找事件中間點或最低點標示
+                const midIndex = Math.floor((eventStart + endIndex) / 2);
+                annotations.push({
+                    x: x_axis[midIndex],
+                    y: y_cut[midIndex],
+                    xref: 'x', yref: 'y',
+                    text: `D=${Math.round(eventMagnitude)}`,
+                    showarrow: true,
+                    arrowhead: 2,
+                    ax: 0, ay: -20,
+                    font: {color: '#c0392b', size: 12}
+                });
+            }
+            inDrought = false;
+            eventMagnitude = 0;
+        };
+
+        for (let i = 0; i < yearData.length; i++) {
+            const val = y_rain[i];
+            const cut = y_cut[i];
+            
+            if (val !== null && val < cut) {
+                if (!inDrought) {
+                    inDrought = true;
+                    eventStart = i;
+                }
+                eventMagnitude += (cut - val); // 累積強度
+            } else {
+                if (inDrought) {
+                    closeEvent(i - 1);
+                }
+            }
+        }
+        // 如果年底還在乾旱
+        if (inDrought) closeEvent(yearData.length - 1);
+
+
+        const traceRain = {
+            x: x_axis, y: y_rain,
+            mode: 'lines', name: '30日雨量',
+            line: { color: '#3498db', width: 2.5 }
+        };
+
+        const traceCut = {
+            x: x_axis, y: y_cut,
+            mode: 'lines', name: 'Cutting Level (20%)',
+            line: { color: '#e74c3c', dash: 'dash', width: 2 }
+        };
+
+        const layout = {
+            title: { text: `${year} 年降雨與乾旱事件分析 (D=強度)`, font: {size: 18} },
+            xaxis: { title: '日期' },
+            yaxis: { title: '雨量 (mm)' },
+            shapes: shapes,
+            annotations: annotations,
+            hovermode: 'x unified',
+            margin: { t: 50, b: 50, l: 60, r: 20 },
+            legend: { orientation: "h", y: 1.1 }
+        };
+
+        Plotly.newPlot('main-chart', [traceRain, traceCut], layout);
+    }
+
+    // --- 長條圖切換功能 ---
+    function setBarMode(mode) {
+        currentBarMode = mode;
+        
+        // 更新按鈕樣式
+        document.querySelectorAll('.toggle-btn').forEach(btn => btn.classList.remove('active', 'drought', 'rain'));
+        const activeBtn = event.target;
+        activeBtn.classList.add('active');
+        if(mode === 'drought') activeBtn.classList.add('drought');
+        if(mode === 'rain') activeBtn.classList.add('rain');
+
+        // 重新繪製長條圖
+        const currentYear = parseInt(document.getElementById('year-slider').value);
+        renderBarChart(currentYear);
+    }
+
+    function renderBarChart(highlightYear) {
+        const x_years = globalData.yearlyStats.map(d => d.year);
+        
+        let y_values, title, y_label, baseColor;
+        
+        if (currentBarMode === 'drought') {
+            y_values = globalData.yearlyStats.map(d => d.droughtDays);
+            title = '歷年乾旱天數統計 (天數愈多愈乾旱)';
+            y_label = '低於閾值天數';
+            baseColor = '#bdc3c7'; // 灰色
+        } else {
+            y_values = globalData.yearlyStats.map(d => d.totalRain);
+            title = '歷年總降雨量統計 (雨量愈少愈乾旱)';
+            y_label = '年總雨量 (mm)';
+            baseColor = '#aed6f1'; // 淺藍色
+        }
+
+        // 動態顏色 highlight
+        const colors = x_years.map(yr => {
+            if (yr === highlightYear) return '#f39c12'; // 高亮橘色
+            return baseColor;
+        });
+
+        const trace = {
+            x: x_years,
+            y: y_values,
+            type: 'bar',
+            marker: { color: colors }
+        };
+
+        const layout = {
+            title: title,
+            xaxis: { title: '年份' },
+            yaxis: { title: y_label },
+            margin: { t: 40, b: 40, l: 60, r: 20 }
+        };
+
+        Plotly.newPlot('summary-chart', [trace], layout);
+    }
+</script>
+
+</body>
+</html>
